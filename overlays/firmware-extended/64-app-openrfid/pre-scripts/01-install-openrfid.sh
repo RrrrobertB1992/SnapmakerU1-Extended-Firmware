@@ -17,7 +17,8 @@ TARGET_DIR="$CACHE_DIR/OpenRFID"
 cache_git.sh "$TARGET_DIR" "$GIT_URL" "$GIT_SHA"
 
 # Local patches on top of the pinned OpenRFID commit (skipped if already applied)
-for patch in "$(dirname "$0")"/../openrfid-patches/*.patch; do
+PATCH_DIR="$(realpath "$(dirname "$0")/../openrfid-patches")"
+for patch in "$PATCH_DIR"/*.patch; do
   [[ -e "$patch" ]] || continue
   if git -C "$TARGET_DIR" apply --reverse --check "$patch" 2>/dev/null; then
     echo ">> OpenRFID patch already applied: $(basename "$patch")"
