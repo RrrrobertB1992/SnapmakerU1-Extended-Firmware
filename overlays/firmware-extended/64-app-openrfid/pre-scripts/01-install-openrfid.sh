@@ -16,6 +16,18 @@ set -eo pipefail
 TARGET_DIR="$CACHE_DIR/OpenRFID"
 cache_git.sh "$TARGET_DIR" "$GIT_URL" "$GIT_SHA"
 
+# LOCAL BUILD ONLY: apply unmerged OpenRFID PRs on top of the pinned commit.
+# Reset to a clean checkout first so this works the same for every profile
+# built in one run (the cached checkout keeps files a previous patch added).
+PATCH_DIR="$(realpath "$(dirname "$0")/../openrfid-patches")"
+git -C "$TARGET_DIR" reset -q --hard "$GIT_SHA"
+git -C "$TARGET_DIR" clean -fdq
+for patch in "$PATCH_DIR"/*.patch; do
+  [[ -e "$patch" ]] || continue
+  echo ">> Applying OpenRFID patch: $(basename "$patch")"
+  git -C "$TARGET_DIR" apply "$patch"
+done
+
 echo ">> Installing OpenRFID..."
 cd "$TARGET_DIR"
 make install DESTDIR="$ROOTFS_DIR/usr/local/share/openrfid"
