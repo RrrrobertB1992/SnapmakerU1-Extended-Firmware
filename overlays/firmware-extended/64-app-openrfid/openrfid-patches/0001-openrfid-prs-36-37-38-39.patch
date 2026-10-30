@@ -1,0 +1,610 @@
+diff --git a/src/filament/generic.py b/src/filament/generic.py
+index 81a71bc..683d141 100644
+--- a/src/filament/generic.py
++++ b/src/filament/generic.py
+@@ -26,7 +26,8 @@ class GenericFilament:
+                  drying_temp_c: float,
+                  drying_time_hours: float,
+                  manufacturing_date: str, # ISO 8601 date string
+-                 td: float = 0.0 # Transmission Distance in mm for HueForge/OrcaSlicer-FullSpectrum
++                 td: float = 0.0, # Transmission Distance in mm for HueForge/OrcaSlicer-FullSpectrum
++                 color_mode: str = "default" # Multicolor style: "gradient" or "default" (single color or segments), as in OrcaSlicer's filament_colour_type
+                  ):
+         self.source_processor = source_processor
+         self.unique_id = unique_id
+@@ -43,6 +44,7 @@ class GenericFilament:
+         self.drying_time_hours = drying_time_hours
+         self.manufacturing_date = manufacturing_date
+         self.td = td
++        self.color_mode = color_mode if color_mode in ("gradient", "default") else "default"
+ 
+         if "CF" in self.modifiers:
+             self.type += "-CF"
+@@ -70,7 +72,8 @@ class GenericFilament:
+             f"- Bed Temp: {self.bed_temp_c:.1f}C",
+             f"- Drying: {self.drying_temp_c:.1f}C for {self.drying_time_hours:.1f} hours",
+             f"- Manufactured on: {self.manufacturing_date}",
+-            f"- TD: {self.td:.1f} mm"
++            f"- TD: {self.td:.1f} mm",
++            f"- Color mode: {self.color_mode}"
+         ])
+ 
+     @property
+@@ -102,7 +105,8 @@ class GenericFilament:
+             "drying_temp_c": self.drying_temp_c,
+             "drying_time_hours": self.drying_time_hours,
+             "manufacturing_date": self.manufacturing_date,
+-            "td": self.td
++            "td": self.td,
++            "color_mode": self.color_mode
+         }
+     
+     @staticmethod
+diff --git a/src/tag/openspool/processor.py b/src/tag/openspool/processor.py
+index f8eb523..7d49399 100644
+--- a/src/tag/openspool/processor.py
++++ b/src/tag/openspool/processor.py
+@@ -41,12 +41,21 @@ class OpenspoolTagProcessor(NdefTagProcessor):
+                 return None
+             
+             brand = data.get('brand', 'Generic')
++            # color_type uses OrcaSlicer's filament_colour_type values:
++            # 0 = gradient, 1 = default. Missing or other values are default.
++            color_mode = "gradient" if str(data.get('color_type', '')).strip() == '0' else "default"
+             main_type = data.get('type', 'PLA').upper()
+             subtype = data.get('subtype', '')
+             color_hex = self.__parse_color_hex(data.get('color_hex', 'FFFFFF'))
+-            alpha = max(0x00, min(0xFF, int(data.get('alpha', 'FF'), 16)))
++            alpha = self.__parse_alpha(data.get('alpha', 'FF'))
+             color_argb = (alpha << 24) | color_hex
+ 
++            colors = [color_argb]
++            additional = data.get('additional_color_hexes') or []
++            if isinstance(additional, list):
++                for extra_hex in additional[:4]:
++                    colors.append((alpha << 24) | self.__parse_color_hex(extra_hex))
++
+             try:
+                 diameter_mm = float(data.get('diameter', 1.75))
+             except (ValueError, TypeError):
+@@ -76,11 +85,11 @@ class OpenspoolTagProcessor(NdefTagProcessor):
+ 
+             return GenericFilament(
+                 source_processor=self.name,
+-                unique_id=GenericFilament.generate_unique_id("OpenSpool", brand, main_type, subtype, color_argb),
++                unique_id=GenericFilament.generate_unique_id("OpenSpool", brand, main_type, subtype, *colors),
+                 manufacturer=brand,
+                 type=main_type,
+                 modifiers=[subtype] if subtype else [],
+-                colors=[color_argb],
++                colors=colors,
+                 diameter_mm=diameter_mm,
+                 weight_grams=weight_grams,
+                 hotend_min_temp_c=min_temp,
+@@ -88,7 +97,8 @@ class OpenspoolTagProcessor(NdefTagProcessor):
+                 bed_temp_c=bed_temp_c,
+                 drying_temp_c=drying_temp_c,
+                 drying_time_hours=drying_time_hours,
+-                manufacturing_date="0001-01-01"
++                manufacturing_date="0001-01-01",
++                color_mode=color_mode
+             )
+         except json.JSONDecodeError as e:
+             self.logger.exception("OpenSpool payload parsing failed: Invalid JSON: %s", str(e))
+@@ -97,6 +107,26 @@ class OpenspoolTagProcessor(NdefTagProcessor):
+             self.logger.exception("OpenSpool payload parsing failed: %s", str(e))
+             return None
+     
++    def __parse_alpha(self, value) -> int:
++        # JSON numbers are decimal (e.g. 128), as documented for the Snapmaker U1
++        # extended firmware and read by its built-in OpenSpool reader. Strings are
++        # hex (e.g. "80"), as this processor has always read them. Invalid values
++        # fall back to opaque instead of rejecting the whole tag.
++        try:
++            if isinstance(value, bool):
++                raise TypeError("alpha must be a number or hex string")
++            if isinstance(value, (int, float)):
++                alpha = int(value)
++            else:
++                alpha_str = str(value).strip()
++                if alpha_str.startswith('#'):
++                    alpha_str = alpha_str[1:]
++                alpha = int(alpha_str, 16)
++            return max(0x00, min(0xFF, alpha))
++        except (ValueError, TypeError, OverflowError):
++            self.logger.warning(f"OpenSpool: Invalid alpha value {value!r}, using FF")
++            return 0xFF
++
+     def __parse_color_hex(self, value : str):
+         try:
+             hex_str = str(value)
+diff --git a/src/tag/snapmaker/constants.py b/src/tag/snapmaker/constants.py
+index 44ea6ef..6f31774 100644
+--- a/src/tag/snapmaker/constants.py
++++ b/src/tag/snapmaker/constants.py
+@@ -67,6 +67,8 @@ M1_PROTO_COLOR_NUMS_POS                         = (1 * 64 + 0 * 16 + 8)
+ M1_PROTO_COLOR_NUMS_LEN                         = (1)
+ M1_PROTO_ALPHA_POS                              = (1 * 64 + 0 * 16 + 9)
+ M1_PROTO_ALPHA_LEN                              = (1)
++M1_PROTO_MULTI_MODE_POS                         = (1 * 64 + 0 * 16 + 10)
++M1_PROTO_MULTI_MODE_LEN                         = (1)
+ M1_PROTO_RGB_1_POS                              = (1 * 64 + 1 * 16 + 0)
+ M1_PROTO_RGB_1_LEN                              = (3)
+ M1_PROTO_RGB_2_POS                              = (1 * 64 + 1 * 16 + 3)
+diff --git a/src/tag/snapmaker/processor.py b/src/tag/snapmaker/processor.py
+index 6819cd4..153f3a3 100644
+--- a/src/tag/snapmaker/processor.py
++++ b/src/tag/snapmaker/processor.py
+@@ -123,6 +123,10 @@ class SnapmakerTagProcessor(MifareClassicTagProcessor):
+         self.logger.debug(" Card UID: %s", card_uid.hex(':').upper())
+ 
+         colors = [rgb_1, rgb_2, rgb_3, rgb_4, rgb_5][:color_nums]
++        # MULTI_MODE byte, as read by Snapmaker's u1-klipper (M1_PROTO_MULTI_MODE_POS).
++        # Snapmaker values: 0 = segment, anything else = gradient (as in Snapmaker
++        # Orca's FilamentColorModeFromConfig).
++        color_mode = "gradient" if data[Constants.M1_PROTO_MULTI_MODE_POS] != 0 else "default"
+ 
+         return GenericFilament(
+             source_processor=self.name,
+@@ -138,7 +142,8 @@ class SnapmakerTagProcessor(MifareClassicTagProcessor):
+             bed_temp_c=bed_temp,
+             drying_temp_c=drying_temp,
+             drying_time_hours=drying_time,
+-            manufacturing_date="2026-01-01" # TODO: Extract actual date
++            manufacturing_date="2026-01-01", # TODO: Extract actual date
++            color_mode=color_mode
+         )
+     
+     def __hkdf_create_key(self, ikm : bytes, salt : bytes, key_type='a'):
+diff --git a/src/tag/tigertag/constants.py b/src/tag/tigertag/constants.py
+index 75cdd52..0dcfece 100644
+--- a/src/tag/tigertag/constants.py
++++ b/src/tag/tigertag/constants.py
+@@ -20,10 +20,20 @@ OFF_DRY_TIME = 29
+ OFF_BED_TEMP_MIN = 30
+ OFF_BED_TEMP_MAX = 31
+ OFF_TIMESTAMP = 32
++OFF_COLOR2_RGB = 36
++OFF_COLOR3_RGB = 40
+ OFF_TD = 44
+ OFF_METADATA = 48
+ OFF_SIGNATURE = 80
+ 
++# Multi-color aspects, matched by id (not by label, which may be renamed in
++# id_aspect.json): aspect id -> number of colors on the chip.
++MULTICOLOR_ASPECT_COLOR_COUNT = {
++    252: 2,  # Bicolor
++    24: 3,   # Tricolor
++    145: 3,  # Rainbow
++}
++
+ MIN_DATA_LENGTH = 96
+ USER_DATA_PAGE_OFFSET = 4
+ USER_DATA_BYTE_OFFSET = USER_DATA_PAGE_OFFSET * 4
+diff --git a/src/tag/tigertag/processor.py b/src/tag/tigertag/processor.py
+index 975670b..640a354 100644
+--- a/src/tag/tigertag/processor.py
++++ b/src/tag/tigertag/processor.py
+@@ -47,6 +47,16 @@ class TigerTagProcessor(MifareUltralightTagProcessor):
+             a = user_data[Constants.OFF_COLOR_RGBA + 3]
+             argb_color = (a << 24) | (r << 16) | (g << 8) | b
+ 
++            # Multi-color: a multi-color aspect can be on Aspect 1 or Aspect 2, so
++            # both are checked and the highest color count wins (spec section 2.5).
++            # Colors 2 and 3 are stored as RGB and reuse the alpha of color 1.
++            color_count = max(Constants.MULTICOLOR_ASPECT_COLOR_COUNT.get(aspect1_id, 1),
++                              Constants.MULTICOLOR_ASPECT_COLOR_COUNT.get(aspect2_id, 1))
++            colors = [argb_color]
++            for offset in (Constants.OFF_COLOR2_RGB, Constants.OFF_COLOR3_RGB)[:color_count - 1]:
++                if len(user_data) >= offset + 3:
++                    colors.append((a << 24) | (user_data[offset] << 16) | (user_data[offset + 1] << 8) | user_data[offset + 2])
++
+             weight_bytes = user_data[Constants.OFF_WEIGHT:Constants.OFF_WEIGHT + 3]
+             measure_value = (weight_bytes[0] << 16) | (weight_bytes[1] << 8) | weight_bytes[2]
+             unit_id = user_data[Constants.OFF_UNIT_ID]
+@@ -93,7 +103,7 @@ class TigerTagProcessor(MifareUltralightTagProcessor):
+             self.logger.debug("  Brand: %s (ID: %d)", brand_name, brand_id)
+             self.logger.debug("  Diameter: %.2f mm (ID: %d)", diameter_mm, diameter_id)
+             self.logger.debug("  Aspect1: %s, Aspect2: %s", aspect1_label, aspect2_label)
+-            self.logger.debug("  Color (ARGB): 0x%08X", argb_color)
++            self.logger.debug("  Colors (ARGB): %s", " ".join(f"0x{color:08X}" for color in colors))
+             self.logger.debug("  Measure: %d %s (%.1f g)", measure_value, unit_label, weight_grams)
+             self.logger.debug("  Nozzle Temp: %d-%d °C", temp_min, temp_max)
+             self.logger.debug("  Dry: %d °C for %d hours", dry_temp, dry_time)
+@@ -104,13 +114,13 @@ class TigerTagProcessor(MifareUltralightTagProcessor):
+             return GenericFilament(
+                 source_processor=self.name,
+                 unique_id=GenericFilament.generate_unique_id(
+-                    "TigerTag", brand_name, resolved_material_type, argb_color,
++                    "TigerTag", brand_name, resolved_material_type, *colors,
+                     product_id, timestamp_raw
+                 ),
+                 manufacturer=brand_name,
+                 type=resolved_material_type,
+                 modifiers=modifiers,
+-                colors=[argb_color],
++                colors=colors,
+                 diameter_mm=diameter_mm,
+                 weight_grams=weight_grams,
+                 hotend_min_temp_c=float(temp_min),
+diff --git a/test/tags/OpenSpool/Generic PLA Magenta OpenSpool.yml b/test/tags/OpenSpool/Generic PLA Magenta OpenSpool.yml
+index 1e97be7..10d3e5a 100644
+--- a/test/tags/OpenSpool/Generic PLA Magenta OpenSpool.yml	
++++ b/test/tags/OpenSpool/Generic PLA Magenta OpenSpool.yml	
+@@ -5,6 +5,7 @@ type: PLA
+ modifiers: []
+ colors:
+   - 0xFFF330F9
++color_mode: default
+ diameter_mm: 1.75
+ weight_grams: 1000
+ hotend_min_temp_c: 180
+diff --git a/test/tags/OpenSpool/Generic PLA Silk Default OpenSpool.bin b/test/tags/OpenSpool/Generic PLA Silk Default OpenSpool.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a2249bc9d4be69552455d4e9c425470b7c69bfa
+GIT binary patch
+literal 540
+zcmZSSo<F0)F0o;`2Lr=H0Xqif%eMsfF(wui<YXo%mSpDV>1P$^=NVQjm8BLH1G!38
+zN``s{N;*mfMfoN9$@w`zf&7BhyyAj<AX`T%sVFfo1t{j8nwMIXnG6&usVqnZ3IzB#
+z0y)K{Nl<=pW==Lx0BAyfQG7;f1yG5bn*k621rt+JGC_7H=ETG0Q;U_XqLn}j+}xC6
+pb(C^5^WsZVa|@KL3@r_S+{6kf*T@*ig=m9VWmx-<VHA)N0swooOjQ5?
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/tags/OpenSpool/Generic PLA Silk Default OpenSpool.yml b/test/tags/OpenSpool/Generic PLA Silk Default OpenSpool.yml
+new file mode 100644
+index 0000000..6984daf
+--- /dev/null
++++ b/test/tags/OpenSpool/Generic PLA Silk Default OpenSpool.yml	
+@@ -0,0 +1,8 @@
++source_processor: OpenspoolTagProcessor
++manufacturer: Generic
++type: PLA
++modifiers:
++  - Silk
++color_mode: default
++hotend_min_temp_c: 190
++hotend_max_temp_c: 230
+diff --git a/test/tags/OpenSpool/Generic PLA Silk Gradient OpenSpool.bin b/test/tags/OpenSpool/Generic PLA Silk Gradient OpenSpool.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..da159385d1e6f3fe270ab888365b5cc8ea7d8f9a
+GIT binary patch
+literal 540
+zcmZSSo<F0)F0o;`2Lr=H0Xqif%eMsfF(wui<YXo%mSpDV>1P$^=NVQjm8BLH1G!38
+zN``s{N;*mfMfoN9$@w`zf&7BhyyAj<AX`T%sVFfo1t{j8nwMIXnG6&usVqnZ3IzB#
+z0y)K{Nl<=pW==Lx0BAyfQG7;f1yG5bn*k621rt+JGC_7H=ETG0Q;U_XqLn}j+}xC6
+pb(C^5^WsZVa|@KL3@r_S+{6kf*T@*ig=m9VWl;N%VHA)N0swk@OjG~>
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/tags/OpenSpool/Generic PLA Silk Gradient OpenSpool.yml b/test/tags/OpenSpool/Generic PLA Silk Gradient OpenSpool.yml
+new file mode 100644
+index 0000000..b3e55e0
+--- /dev/null
++++ b/test/tags/OpenSpool/Generic PLA Silk Gradient OpenSpool.yml	
+@@ -0,0 +1,8 @@
++source_processor: OpenspoolTagProcessor
++manufacturer: Generic
++type: PLA
++modifiers:
++  - Silk
++color_mode: gradient
++hotend_min_temp_c: 190
++hotend_max_temp_c: 230
+diff --git a/test/tags/OpenSpool/eSUN PLA Silk Red Blue OpenSpool.bin b/test/tags/OpenSpool/eSUN PLA Silk Red Blue OpenSpool.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed49af9d7672b8af1f91db53e8a4b7072c266255
+GIT binary patch
+literal 540
+zcmZSSo<F0)F0o;`2Lr=H0XqifgSQ0MFeVlh<YXo%mSpDV>1P$^=NVQjm8BLH1G!38
+zN``s{N;*mfMfoN9$@w`zf&7BhyyAj<AX`T%sVFfo1t^vp9O?(;mQ)s`0(k*GjzCUv
+zX%dtloSBmi6aZ?^FN)7dtpF-<b29(}pkQK3N+!tS#GH7zd}^_hRkRXFft#CBtd3G{
+gW?p<rYHop&m7%2pkegTm<r*0q)c#`_1yl(E0PQSAv;Y7A
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/tags/OpenSpool/eSUN PLA Silk Red Blue OpenSpool.yml b/test/tags/OpenSpool/eSUN PLA Silk Red Blue OpenSpool.yml
+new file mode 100644
+index 0000000..e27551a
+--- /dev/null
++++ b/test/tags/OpenSpool/eSUN PLA Silk Red Blue OpenSpool.yml	
+@@ -0,0 +1,18 @@
++source_processor: OpenspoolTagProcessor
++unique_id: f409ec9a27e7527e5e2e9f6e10f95c60ec79a9ecfbc4f7fc13f99fd814147953
++manufacturer: eSUN
++type: PLA
++modifiers:
++  - Silk
++colors:
++  - 0xFFFF0000
++  - 0xFF0000FF
++diameter_mm: 1.75
++weight_grams: 1000
++hotend_min_temp_c: 190
++hotend_max_temp_c: 230
++bed_temp_c: 60.0
++drying_temp_c: 50.0
++drying_time_hours: 8.0
++manufacturing_date: "0001-01-01"
++td: 0.0
+\ No newline at end of file
+diff --git a/test/tags/Snapmaker/Snapmaker SnapSpeed PLA Red 500g.yml b/test/tags/Snapmaker/Snapmaker SnapSpeed PLA Red 500g.yml
+index b5c9ac0..4a393d0 100644
+--- a/test/tags/Snapmaker/Snapmaker SnapSpeed PLA Red 500g.yml	
++++ b/test/tags/Snapmaker/Snapmaker SnapSpeed PLA Red 500g.yml	
+@@ -6,6 +6,7 @@ modifiers:
+   - SnapSpeed
+ colors:
+   - 0xFFE72F1D
++color_mode: default
+ diameter_mm: 1.75
+ weight_grams: 500
+ hotend_min_temp_c: 190
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor (Aspect 1).bin b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor (Aspect 1).bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..eaf25f884e96df573e6217ba78459f8985747f21
+GIT binary patch
+literal 180
+zcmb3BDpHaxB+&5i00YBA0U?Gx{HLc+TPt{bs`sCaK8xK}cb~rf&%pdbl;IM?Gb0XN
+zM}uX5Udv7R&+y-sfhdsmu8_yPXNG<Nv(P`cpUMeS1wWq7VO)Es|5{+!QrS{ri8($c
+q+?QHb&o7pJ-gRuve4GA&+a`SOn}1eYdP(Wre+0B-FA)DnwhRD+tU0Ox
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor (Aspect 1).yml b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor (Aspect 1).yml
+new file mode 100644
+index 0000000..eae5cae
+--- /dev/null
++++ b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor (Aspect 1).yml	
+@@ -0,0 +1,19 @@
++bed_temp_c: 0.0
++colors:
++- 0xFFDDE5ED
++- 0xFF1E90FF
++diameter_mm: 1.75
++drying_temp_c: 50.0
++drying_time_hours: 8.0
++hotend_max_temp_c: 230.0
++hotend_min_temp_c: 210.0
++manufacturer: eSun
++manufacturing_date: '2025-11-12'
++modifiers:
++- Bicolor
++- Basic
++source_processor: TigerTagProcessor
++td: 0.0
++type: PLA
++unique_id: 2a1b203b21bab0e5f1d1b7d1f905705ad35c35a0cf4a21c03530c082e6d33465
++weight_grams: 1000.0
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor and Tricolor.bin b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor and Tricolor.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..bebf67fa6f90f2e396914026546e3847ee6e7204
+GIT binary patch
+literal 180
+zcmb3BDpHaxB+&5i00YBA0U?Gx{HLc+TPt{bs`np>K8xK}cb~rf&%pdbl;IM?Gb0XN
+zM}uX5Udv7R&+y-sfhdsmu8_yPXNG<Nv(P`cpUMeS1wWq7VO)Es|5{+!QrS{ri8($c
+q+?QHb&o7pJ-gRuve4GA&+a`SOn}1eYdP(Wre+0B-FA)DnwhRDM+&NkR
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor and Tricolor.yml b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor and Tricolor.yml
+new file mode 100644
+index 0000000..78b9d82
+--- /dev/null
++++ b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor and Tricolor.yml	
+@@ -0,0 +1,20 @@
++bed_temp_c: 0.0
++colors:
++- 0xFFDDE5ED
++- 0xFF1E90FF
++- 0xFFFF4500
++diameter_mm: 1.75
++drying_temp_c: 50.0
++drying_time_hours: 8.0
++hotend_max_temp_c: 230.0
++hotend_min_temp_c: 210.0
++manufacturer: eSun
++manufacturing_date: '2025-11-12'
++modifiers:
++- Bicolor
++- Tricolor
++source_processor: TigerTagProcessor
++td: 0.0
++type: PLA
++unique_id: 037707719b2099739fba91970970075f5f8f21cbb42734ccf8a5c4a12a1742da
++weight_grams: 1000.0
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor.bin b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fbe5ba1cfc612c4509b015de95829f0ff30052e
+GIT binary patch
+literal 180
+zcmb3BDpHaxB+&5i00YBA0U?Gx{HLc+TPt{bs&~epK8xK}cb~rf&%pdbl;IM?Gb0XN
+zM}uX5Udv7R&p<55dRNF}-ZMi#fLZ9D+fU_$se&I*=P<6l(|;{6Y^iLiu*4jn67EYa
+mtLGQXKJPlVX1+~-z-<#g_su`6Exn|4?mq(Bvloa_ECc}NUN~j|
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor.yml b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor.yml
+new file mode 100644
+index 0000000..f5101b7
+--- /dev/null
++++ b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Bicolor.yml	
+@@ -0,0 +1,19 @@
++bed_temp_c: 0.0
++colors:
++- 0xFFDDE5ED
++- 0xFF1E90FF
++diameter_mm: 1.75
++drying_temp_c: 50.0
++drying_time_hours: 8.0
++hotend_max_temp_c: 230.0
++hotend_min_temp_c: 210.0
++manufacturer: eSun
++manufacturing_date: '2025-11-12'
++modifiers:
++- Basic
++- Bicolor
++source_processor: TigerTagProcessor
++td: 0.0
++type: PLA
++unique_id: 2a1b203b21bab0e5f1d1b7d1f905705ad35c35a0cf4a21c03530c082e6d33465
++weight_grams: 1000.0
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Rainbow (Aspect 1).bin b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Rainbow (Aspect 1).bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..052800802be646278ac774bef47370b48efc1b36
+GIT binary patch
+literal 180
+zcmb3BDpHaxB+&5i00YBA0U?Gx{HLc+TPt{bs`o^OK8xK}cb~rf&%pdbl;IM?Gb0XN
+zM}uX5Udv7R&+y-sfhdsmu8_yPXNG<Nv(P`cpUMeS1wWq7VO)Es|5{+!QrS{ri8($c
+q+?QHb&o7pJ-gRuve4GA&+a`SOn}1eYdP(Wre+0B-FA)DnwhRCTCOFps
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Rainbow (Aspect 1).yml b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Rainbow (Aspect 1).yml
+new file mode 100644
+index 0000000..611220a
+--- /dev/null
++++ b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Rainbow (Aspect 1).yml	
+@@ -0,0 +1,19 @@
++bed_temp_c: 0.0
++colors:
++- 0xFFDDE5ED
++- 0xFF1E90FF
++- 0xFFFF4500
++diameter_mm: 1.75
++drying_temp_c: 50.0
++drying_time_hours: 8.0
++hotend_max_temp_c: 230.0
++hotend_min_temp_c: 210.0
++manufacturer: eSun
++manufacturing_date: '2025-11-12'
++modifiers:
++- Rainbow
++source_processor: TigerTagProcessor
++td: 0.0
++type: PLA
++unique_id: 037707719b2099739fba91970970075f5f8f21cbb42734ccf8a5c4a12a1742da
++weight_grams: 1000.0
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Tricolor.bin b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Tricolor.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e271d1e2d608e5ffeadba4e969ac2583e57f50c
+GIT binary patch
+literal 180
+zcmb3BDpHaxB+&5i00YBA0U?Gx{HLc+TPt{bs&|G&pT%ygyHDT#XJCFI%5aI{nGuJs
+zqrtL2ujMBEXZY{RKorP&SIA@DGebXsS?HhJPvwNEf*()kFs{ARe=RU<scfmR#2lXz
+q?n^DJ=NHR9?>e?-zD<9?Z4*BC%|ELxy`*&RKLT2^7l{8OTLu97#W=<Q
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Tricolor.yml b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Tricolor.yml
+new file mode 100644
+index 0000000..0af60cf
+--- /dev/null
++++ b/test/tags/Tigertag/eSun PLA Basic Refill Cold White TigerTag+ Tricolor.yml	
+@@ -0,0 +1,20 @@
++bed_temp_c: 0.0
++colors:
++- 0xFFDDE5ED
++- 0xFF1E90FF
++- 0xFFFF4500
++diameter_mm: 1.75
++drying_temp_c: 50.0
++drying_time_hours: 8.0
++hotend_max_temp_c: 230.0
++hotend_min_temp_c: 210.0
++manufacturer: eSun
++manufacturing_date: '2025-11-12'
++modifiers:
++- Basic
++- Tricolor
++source_processor: TigerTagProcessor
++td: 0.0
++type: PLA
++unique_id: 037707719b2099739fba91970970075f5f8f21cbb42734ccf8a5c4a12a1742da
++weight_grams: 1000.0
+diff --git a/test/test_openspool_alpha.py b/test/test_openspool_alpha.py
+new file mode 100644
+index 0000000..a192119
+--- /dev/null
++++ b/test/test_openspool_alpha.py
+@@ -0,0 +1,72 @@
++"""OpenSpool alpha: JSON numbers are decimal, strings are hex, invalid values are opaque."""
++import json
++from pathlib import Path
++import sys
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++
++from reader.scan_result import ScanResult
++from tag.openspool.processor import OpenspoolTagProcessor
++from tag.tag_types import TagType
++
++
++@pytest.fixture
++def processor():
++    return OpenspoolTagProcessor({"__name": "openspool"})
++
++
++@pytest.fixture
++def scan():
++    return ScanResult(TagType.MifareUltralight, b"\x01\x02\x03\x04", b"\x00\x44", b"\x00", b"\x00")
++
++
++def tag(data):
++    # Single application/json NDEF record in a Type 2 tag image
++    payload = json.dumps(data).encode()
++    mime = b"application/json"
++    record = bytes([0xD2, len(mime), len(payload)]) + mime + payload
++    return bytes(12) + bytes.fromhex("e1103e00") + b"\x03" + bytes([len(record)]) + record + b"\xfe"
++
++
++def spool(**extra):
++    return {"protocol": "openspool", "version": "1.0", "type": "PLA", "color_hex": "FF0000",
++            "min_temp": 190, "max_temp": 220, **extra}
++
++
++@pytest.mark.parametrize("alpha, expected", [
++    # JSON numbers: decimal, as in the U1 extended firmware's OpenSpool format
++    (255, 0xFF),
++    (128, 0x80),
++    (0, 0x00),
++    (80, 80),
++    (127.6, 127),
++    (300, 0xFF),
++    (-5, 0x00),
++    # Strings: hex, as before
++    ("FF", 0xFF),
++    ("80", 0x80),
++    ("c0", 0xC0),
++    ("#40", 0x40),
++    ("0", 0x00),
++])
++def test_alpha_number_is_decimal_string_is_hex(processor, scan, alpha, expected):
++    result = processor.process_tag(scan, tag(spool(alpha=alpha)))
++    assert result is not None
++    assert result.colors[0] == (expected << 24) | 0xFF0000
++    assert result.to_dict()["alpha"] == expected
++
++
++def test_missing_alpha_is_opaque(processor, scan):
++    result = processor.process_tag(scan, tag(spool()))
++    assert result.colors[0] == 0xFFFF0000
++
++
++@pytest.mark.parametrize("alpha", ["zz", "", None, True, [128], {"a": 1}])
++def test_invalid_alpha_is_opaque_and_tag_still_reads(processor, scan, alpha):
++    # Previously any non-hex-string alpha made the whole tag unreadable
++    result = processor.process_tag(scan, tag(spool(alpha=alpha)))
++    assert result is not None
++    assert result.type == "PLA"
++    assert result.colors[0] == 0xFFFF0000
