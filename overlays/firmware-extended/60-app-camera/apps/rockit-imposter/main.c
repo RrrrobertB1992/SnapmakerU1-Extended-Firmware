@@ -295,6 +295,18 @@ static int sock_connect(const char *path)
     return fd;
 }
 
+// Like sock_connect, but keeps retrying until timeout_ms has passed. At boot
+// unisrv can start before capture-v4l2-raw-mpp has created its sockets.
+static int sock_connect_wait(const char *path, int timeout_ms)
+{
+    uint64_t deadline = now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000;
+    for (;;) {
+        int fd = sock_connect(path);
+        if (fd >= 0 || now_us() >= deadline) return fd;
+        usleep(100 * 1000);
+    }
+}
+
 // Read up to `cap` bytes. Stops at EOF, when `exact` bytes were read (if non
 // zero), or on timeout. Returns bytes read, or -1 on error/timeout with no data.
 static ssize_t sock_read(int fd, uint8_t *buf, size_t cap, size_t exact, int timeout_ms)
@@ -578,7 +590,7 @@ RK_S32 RK_MPI_VI_GetChnFrame(RK_S32 pipe, RK_S32 chn, VIDEO_FRAME_INFO_S *frame,
     uint8_t *raw = malloc(raw_size);
     if (!raw) return RK_FAILURE;
 
-    int fd = sock_connect(g_raw_sock);
+    int fd = sock_connect_wait(g_raw_sock, ms);
     ssize_t n = fd >= 0 ? sock_read(fd, raw, raw_size, raw_size, ms) : -1;
     if (fd >= 0) close(fd);
     if (n != (ssize_t)raw_size) {
@@ -713,7 +725,7 @@ static RK_S32 get_jpeg(RK_S32 chn, venc_chn_t *v, void *stream, RK_S32 ms)
     const size_t cap = 4 * 1024 * 1024;
     uint8_t *buf = malloc(cap);
     if (!buf) return RK_FAILURE;
-    int fd = sock_connect(g_jpeg_sock);
+    int fd = sock_connect_wait(g_jpeg_sock, ms > 0 ? ms : 2000);
     ssize_t n = fd >= 0 ? sock_read(fd, buf, cap, 0, ms > 0 ? ms : 2000) : -1;
     if (fd >= 0) close(fd);
     if (n < 4 || buf[0] != 0xff || buf[1] != 0xd8) {
