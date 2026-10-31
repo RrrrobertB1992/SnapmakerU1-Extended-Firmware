@@ -7,12 +7,19 @@ if [ "$1" = start ]; then
     CAMERA_INTERNAL=$(/usr/local/bin/extended-config.py get "$EXTENDED_CFG" camera internal snapmaker)
     if [ "$CAMERA_INTERNAL" = paxx12 ]; then
         echo "Starting lmd in v4l2-imposter mode!"
-        export LD_PRELOAD="/usr/local/lib/libv4l2-imposter.so${LD_PRELOAD:+:$LD_PRELOAD}"
+        # libv4l2-imposter: unisrv before 2.1.0 (libv4l2)
+        # librockit-imposter: unisrv 2.1.0 and later (librockit VI/VENC)
+        export LD_PRELOAD="/usr/local/lib/libv4l2-imposter.so:/usr/local/lib/librockit-imposter.so${LD_PRELOAD:+:$LD_PRELOAD}"
         export V4L2_IMPOSTER_SOCKET_PATH=/tmp/capture-mipi-raw.sock
         export V4L2_IMPOSTER_DEVICE=/dev/video11
         export V4L2_IMPOSTER_WIDTH=1920
         export V4L2_IMPOSTER_HEIGHT=1080
         export V4L2_IMPOSTER_FORMAT=nv12
+        export ROCKIT_IMPOSTER_RAW_SOCKET=/tmp/capture-mipi-raw.sock
+        export ROCKIT_IMPOSTER_JPEG_SOCKET=/tmp/capture-mipi-jpeg.sock
+        export ROCKIT_IMPOSTER_H264_SOCKET=/tmp/capture-mipi-h264.sock
+        export ROCKIT_IMPOSTER_WIDTH=1920
+        export ROCKIT_IMPOSTER_HEIGHT=1080
     elif [ "$CAMERA_INTERNAL" != snapmaker ]; then
         echo "Internal camera is not set to 'snapmaker', not starting lmd."
         exit 0
