@@ -40,8 +40,7 @@ settings:
               - -xc
               - |
                 /usr/local/bin/extended-config.py add /home/lava/printer_data/config/extended/extended2.cfg camera internal paxx12 &&
-                /etc/init.d/S90lmd stop &&
-                /etc/init.d/S99v4l2-mpp-mipi restart
+                /usr/local/sbin/camera-internal-restart.sh
           snapmaker:
             label: Snapmaker
             cmd:
@@ -49,8 +48,7 @@ settings:
               - -xc
               - |
                 /usr/local/bin/extended-config.py add /home/lava/printer_data/config/extended/extended2.cfg camera internal snapmaker &&
-                /etc/init.d/S99v4l2-mpp-mipi stop &&
-                /etc/init.d/S90lmd start
+                /usr/local/sbin/camera-internal-restart.sh
           none:
             label: Disabled
             cmd:
@@ -81,7 +79,7 @@ settings:
               - -xc
               - |
                 /usr/local/bin/extended-config.py add /home/lava/printer_data/config/extended/extended2.cfg camera internal_resolution 1080p30 &&
-                /etc/init.d/S99v4l2-mpp-mipi restart
+                /usr/local/sbin/camera-internal-restart.sh
           1080p25:
             label: 1920x1080 @ 25fps
             cmd:
@@ -89,7 +87,7 @@ settings:
               - -xc
               - |
                 /usr/local/bin/extended-config.py add /home/lava/printer_data/config/extended/extended2.cfg camera internal_resolution 1080p25 &&
-                /etc/init.d/S99v4l2-mpp-mipi restart
+                /usr/local/sbin/camera-internal-restart.sh
           1080p15:
             label: 1920x1080 @ 15fps
             cmd:
@@ -97,7 +95,7 @@ settings:
               - -xc
               - |
                 /usr/local/bin/extended-config.py add /home/lava/printer_data/config/extended/extended2.cfg camera internal_resolution 1080p15 &&
-                /etc/init.d/S99v4l2-mpp-mipi restart
+                /usr/local/sbin/camera-internal-restart.sh
           1080p5:
             label: 1920x1080 @ 5fps
             cmd:
@@ -105,8 +103,38 @@ settings:
               - -xc
               - |
                 /usr/local/bin/extended-config.py add /home/lava/printer_data/config/extended/extended2.cfg camera internal_resolution 1080p5 &&
-                /etc/init.d/S99v4l2-mpp-mipi restart
+                /usr/local/sbin/camera-internal-restart.sh
         default: 1080p25
+
+      camera-internal-exposure:
+        label: Internal Camera Exposure
+        description: Auto uses Snapmaker's auto exposure; exposure and gain are read-only in the camera controls. Manual keeps exposure and gain at the values set in the camera controls.
+        if_cmd: test "$(/usr/local/bin/extended-config.py get /home/lava/printer_data/config/extended/extended2.cfg camera internal paxx12)" = "paxx12"
+        get_cmd:
+          - /usr/local/bin/extended-config.py
+          - get
+          - /home/lava/printer_data/config/extended/extended2.cfg
+          - camera
+          - internal_exposure
+          - auto
+        options:
+          auto:
+            label: Auto
+            cmd:
+              - bash
+              - -xc
+              - |
+                /usr/local/bin/extended-config.py add /home/lava/printer_data/config/extended/extended2.cfg camera internal_exposure auto &&
+                /usr/local/sbin/camera-internal-restart.sh
+          manual:
+            label: Manual
+            cmd:
+              - bash
+              - -xc
+              - |
+                /usr/local/bin/extended-config.py add /home/lava/printer_data/config/extended/extended2.cfg camera internal_exposure manual &&
+                /usr/local/sbin/camera-internal-restart.sh
+        default: auto
 
       camera-usb:
         label: USB Camera
