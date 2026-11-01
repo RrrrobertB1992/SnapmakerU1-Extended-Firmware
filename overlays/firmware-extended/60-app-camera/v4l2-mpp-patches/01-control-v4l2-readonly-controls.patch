@@ -1,5 +1,5 @@
---- a/usr/local/bin/control-v4l2.py
-+++ b/usr/local/bin/control-v4l2.py
+--- a/apps/control-v4l2/control-v4l2.py
++++ b/apps/control-v4l2/control-v4l2.py
 @@ -164,11 +164,18 @@
  
      return [ctrl for _, ctrl in sorted(indexed, key=sort_key)]
